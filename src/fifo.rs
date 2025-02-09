@@ -1,5 +1,5 @@
 use core::convert::{TryFrom, TryInto};
-use embedded_hal::i2c::I2c;
+use embedded_hal_async::i2c::I2c;
 
 use crate::{ctrl1xl, ctrl2g, AccelValue, GyroValue, Register};
 
@@ -42,12 +42,12 @@ pub struct FifoOut {
 impl Register for FifoOut {}
 
 impl FifoOut {
-    pub fn new(address: u8) -> Self {
+    pub async fn new(address: u8) -> Self {
         FifoOut { address }
     }
 
     /// Pop a value from the FIFO.
-    pub fn pop<I2C>(
+    pub async fn pop<I2C>(
         &mut self,
         i2c: &mut I2C,
         gyro_scale: ctrl2g::Fs,
@@ -57,7 +57,7 @@ impl FifoOut {
         I2C: I2c,
     {
         let mut out = [0u8; 7];
-        i2c.write_read(self.address, &[ADDR], &mut out)?;
+        i2c.write_read(self.address, &[ADDR], &mut out).await?;
 
         let (tag, out) = out.split_at(1);
         let tag = tag[0] >> 3;
@@ -65,9 +65,9 @@ impl FifoOut {
 
         match tag.try_into() {
             Ok(SensorTag::Empty) => Ok(Value::Empty),
-            Ok(SensorTag::GyroscopeNC) => Ok(Value::Gyro(GyroValue::from_msr(gyro_scale, out))),
+            Ok(SensorTag::GyroscopeNC) => Ok(Value::Gyro(GyroValue::from_msr(gyro_scale, out).await)),
             Ok(SensorTag::AccelerometerNC) => {
-                Ok(Value::Accel(AccelValue::from_msr(accel_scale, out)))
+                Ok(Value::Accel(AccelValue::from_msr(accel_scale, out).await))
             }
             Ok(SensorTag::Other(u)) => Ok(Value::Other(u, *out)),
             _ => unreachable!(),

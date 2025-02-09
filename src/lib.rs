@@ -48,6 +48,7 @@
 
 #![cfg_attr(not(test), no_std)]
 
+
 pub mod ctrl1xl;
 pub mod ctrl2g;
 pub mod ctrl3c;
@@ -65,11 +66,30 @@ use ctrl9xl::Ctrl9Xl;
 use fifoctrl::FifoCtrl;
 use fifostatus::FifoStatus;
 
-/// Datasheet write address for the device. (D6h)
-pub const DEFAULT_I2C_ADDRESS: u8 = 0x6bu8;
+use defmt::Format;
+// use embedded_hal_async::{delay::DelayNs, i2c::I2c};
+// use uom::si::f32::{Length, Pressure, ThermodynamicTemperature, Acceleration, AngularAcceleration};
+// use uom::si::thermodynamic_temperature::degree_celsius;
+// use uom::si::acceleration::meter_per_second_squared;
+// use uom::si::angular_acceleration::radian_per_second_squared;
 
 const SENSORS_DPS_TO_RADS: f64 = 0.017453292;
 const SENSORS_GRAVITY_STANDARD: f64 = 9.80665;
+pub const DEFAULT_I2C_ADDRESS: u8 = 0x6b;
+
+#[derive(Debug, Clone, Copy, Format)]
+pub enum Error<E> {
+    /// An error occurred while communicating with the ISM330DHCX over I2C. The inner error contains the specific error.
+    I2c(E),
+}
+
+/// Note: [`embedded_hal_async::i2c::ErrorKind`] is an alias for [`embedded_hal::i2c::ErrorKind`], so the one impl
+/// covers both.
+impl From<embedded_hal_async::i2c::ErrorKind> for Error<embedded_hal_async::i2c::ErrorKind> {
+    fn from(error: embedded_hal_async::i2c::ErrorKind) -> Self {
+        Error::I2c(error)
+    }
+}
 
 #[derive(Copy, Clone, Debug, defmt::Format)]
 pub struct GyroValue {
@@ -77,12 +97,52 @@ pub struct GyroValue {
     count: [i16; 3],
 }
 
+// pub struct Measurement {
+//     // pub gyro: GyroValue,
+//     // pub accel: AccelValue,
+//     pub gyroscope: [AngularAcceleration; 3],
+//     pub acceleration: [Acceleration; 3],
+//     pub temperature: ThermodynamicTemperature,
+// }
+
+#[derive(Debug, Clone, Copy)]
+pub struct Measurement {
+    pub gyro: GyroValue,
+    pub accel: AccelValue,
+    pub temp: f32,
+}
+
+// impl Format for Measurement {
+//     fn format(&self, f: defmt::Formatter) {
+//         defmt::write!(
+//             f,
+//             "Gyro: {:?}, Accel: {:?}, Temp: {:?}",
+//             self.gyroscope,
+//             self.acceleration,
+//             self.temperature
+//         );
+//     }
+// }
+
+#[derive(Debug, Clone, Copy, Format)]
+pub enum Address {
+    /// Datasheet write address for the device. (D6h)
+    Default = 0x6b,
+    Alternative = 0x6a,
+}
+impl From<Address> for u8 {
+    /// Convert the address to a [`u8`] for I2C communication.
+    fn from(address: Address) -> u8 {
+        address as u8
+    }
+}
+
 impl GyroValue {
-    pub fn new(range: ctrl2g::Fs, count: [i16; 3]) -> GyroValue {
+    pub async fn new(range: ctrl2g::Fs, count: [i16; 3]) -> GyroValue {
         GyroValue { range, count }
     }
 
-    pub fn from_msr(range: ctrl2g::Fs, measurements: &[u8; 6]) -> GyroValue {
+    pub async fn from_msr(range: ctrl2g::Fs, measurements: &[u8; 6]) -> GyroValue {
         let raw_gyro_x = (measurements[1] as i16) << 8 | (measurements[0] as i16);
         let raw_gyro_y = (measurements[3] as i16) << 8 | (measurements[2] as i16);
         let raw_gyro_z = (measurements[5] as i16) << 8 | (measurements[4] as i16);
@@ -92,24 +152,24 @@ impl GyroValue {
         }
     }
 
-    pub fn count(&self) -> [i16; 3] {
+    pub async fn count(&self) -> [i16; 3] {
         self.count
     }
 
     /// As radians [rad]
-    pub fn as_rad(&self) -> [f64; 3] {
-        self.as_mdps().map(|v| v * SENSORS_DPS_TO_RADS / 1000.)
+    pub async fn as_rad(&self) -> [f64; 3] {
+        self.as_mdps().await.map(|v| v * SENSORS_DPS_TO_RADS / 1000.)
     }
 
     /// As milli degrees per second [mdps]
-    pub fn as_mdps(&self) -> [f64; 3] {
-        let sensitivity = self.range.sensitivity() as f64;
+    pub async fn as_mdps(&self) -> [f64; 3] {
+        let sensitivity = self.range.sensitivity().await as f64;
         self.count.map(|r| r as f64 * sensitivity)
     }
 
     /// As degrees per second [dps]
-    pub fn as_dps(&self) -> [f64; 3] {
-        self.as_mdps().map(|v| v / 1000.)
+    pub async fn as_dps(&self) -> [f64; 3] {
+        self.as_mdps().await.map(|v| v / 1000.)
     }
 }
 
@@ -120,11 +180,11 @@ pub struct AccelValue {
 }
 
 impl AccelValue {
-    pub fn new(range: ctrl1xl::Fs_Xl, count: [i16; 3]) -> AccelValue {
+    pub async fn new(range: ctrl1xl::Fs_Xl, count: [i16; 3]) -> AccelValue {
         AccelValue { range, count }
     }
 
-    pub fn from_msr(range: ctrl1xl::Fs_Xl, measurements: &[u8; 6]) -> AccelValue {
+    pub async fn from_msr(range: ctrl1xl::Fs_Xl, measurements: &[u8; 6]) -> AccelValue {
         let raw_acc_x = (measurements[1] as i16) << 8 | (measurements[0] as i16);
         let raw_acc_y = (measurements[3] as i16) << 8 | (measurements[2] as i16);
         let raw_acc_z = (measurements[5] as i16) << 8 | (measurements[4] as i16);
@@ -134,49 +194,49 @@ impl AccelValue {
         }
     }
 
-    pub fn count(&self) -> [i16; 3] {
+    pub async fn count(&self) -> [i16; 3] {
         self.count
     }
 
     /// As [m/s^2]
-    pub fn as_m_ss(&self) -> [f64; 3] {
-        self.as_mg().map(|v| v * SENSORS_GRAVITY_STANDARD / 1000.)
+    pub async fn as_m_ss(&self) -> [f64; 3] {
+        self.as_mg().await.map(|v| v * SENSORS_GRAVITY_STANDARD / 1000.)
     }
 
     /// As [milli-g]
-    pub fn as_mg(&self) -> [f64; 3] {
-        let sensitivity = self.range.sensitivity() as f64;
+    pub async fn as_mg(&self) -> [f64; 3] {
+        let sensitivity = self.range.sensitivity().await as f64;
         self.count.map(|r| r as f64 * sensitivity)
     }
 
     /// As [g]
-    pub fn as_g(&self) -> [f64; 3] {
-        self.as_mg().map(|v| v / 1000.)
+    pub async fn as_g(&self) -> [f64; 3] {
+        self.as_mg().await.map(|v| v / 1000.)
     }
 }
 
 trait Register {
-    fn read<I2C>(&self, i2c: &mut I2C, chip_addr: u8, reg_addr: u8) -> Result<u8, I2C::Error>
-    where
-        I2C: embedded_hal::i2c::I2c,
-    {
-        let mut data: [u8; 1] = [0];
-        i2c.write_read(chip_addr, &[reg_addr], &mut data)?;
-        Ok(data[0])
-    }
+    async fn read<I2C>(&self, i2c: &mut I2C, chip_addr: u8, reg_addr: u8) -> Result<u8, I2C::Error>
+        where
+            I2C: embedded_hal_async::i2c::I2c,
+        {
+            let mut data: [u8; 1] = [0];
+            i2c.write_read(chip_addr, &[reg_addr], &mut data).await?;
+            Ok(data[0])
+        }
 
-    fn write<I2C>(
+    async fn write<I2C>(
         &self,
         i2c: &mut I2C,
         chip_addr: u8,
         reg_addr: u8,
         bits: u8,
     ) -> Result<(), I2C::Error>
-    where
-        I2C: embedded_hal::i2c::I2c,
-    {
-        i2c.write(chip_addr, &[reg_addr, bits])
-    }
+        where
+            I2C: embedded_hal_async::i2c::I2c,
+        {
+            i2c.write(chip_addr, &[reg_addr, bits]).await
+        }
 }
 
 pub struct Ism330Dhcx {
@@ -191,27 +251,27 @@ pub struct Ism330Dhcx {
 }
 
 impl Ism330Dhcx {
-    pub fn new<I2C>(i2c: &mut I2C) -> Result<Self, I2C::Error>
+    pub async fn new<I2C>(i2c: &mut I2C) -> Result<Self, I2C::Error>
     where
-        I2C: embedded_hal::i2c::I2c,
+        I2C: embedded_hal_async::i2c::I2c,
     {
-        Self::new_with_address(i2c, DEFAULT_I2C_ADDRESS)
+        Self::new_with_address(i2c, DEFAULT_I2C_ADDRESS).await
     }
 
-    pub fn new_with_address<I2C>(i2c: &mut I2C, address: u8) -> Result<Self, I2C::Error>
+    pub async fn new_with_address<I2C>(i2c: &mut I2C, address: u8) -> Result<Self, I2C::Error>
     where
-        I2C: embedded_hal::i2c::I2c,
+        I2C: embedded_hal_async::i2c::I2c,
     {
         let mut registers = [0u8; 13];
-        i2c.write_read(address, &[0x10], &mut registers)?;
+        i2c.write_read(address, &[0x10], &mut registers).await?;
 
-        let ctrl1xl = Ctrl1Xl::new(registers[0], address);
-        let ctrl2g = Ctrl2G::new(registers[1], address);
+        let ctrl1xl = Ctrl1Xl::new(registers[0], address).await;
+        let ctrl2g = Ctrl2G::new(registers[1], address).await;
         let ctrl3c = Ctrl3C::new(registers[2], address);
-        let ctrl7g = Ctrl7G::new(registers[6], address);
-        let ctrl9xl = Ctrl9Xl::new(registers[8], address);
-        let fifoctrl = FifoCtrl::new(registers[9..13].try_into().unwrap(), address);
-        let fifostatus = FifoStatus::new(address);
+        let ctrl7g = Ctrl7G::new(registers[6], address).await;
+        let ctrl9xl = Ctrl9Xl::new(registers[8], address).await;
+        let fifoctrl = FifoCtrl::new(registers[9..13].try_into().unwrap(), address).await;
+        let fifostatus = FifoStatus::new(address).await;
 
         let ism330dhcx = Self {
             address,
@@ -227,7 +287,7 @@ impl Ism330Dhcx {
         Ok(ism330dhcx)
     }
 
-    pub fn set_address(&mut self, address: u8) {
+    pub async fn set_address(&mut self, address: u8) {
         self.ctrl1xl.address = address;
         self.ctrl2g.address = address;
         self.ctrl3c.address = address;
@@ -238,12 +298,12 @@ impl Ism330Dhcx {
     }
 
     /// Get temperature in Celsius.
-    pub fn get_temperature<I2C>(&mut self, i2c: &mut I2C) -> Result<f32, I2C::Error>
+    pub async fn get_temperature<I2C>(&mut self, i2c: &mut I2C) -> Result<f32, I2C::Error>
     where
-        I2C: embedded_hal::i2c::I2c,
+        I2C: embedded_hal_async::i2c::I2c,
     {
         let mut measurements = [0u8; 2];
-        i2c.write_read(self.address, &[0x20], &mut measurements)?;
+        i2c.write_read(self.address, &[0x20], &mut measurements).await?;
 
         let raw_temp = (measurements[1] as i16) << 8 | measurements[0] as i16;
         let temp: f32 = (raw_temp as f32 / 256.0) + 25.0;
@@ -251,38 +311,65 @@ impl Ism330Dhcx {
         Ok(temp)
     }
 
-    pub fn get_gyroscope<I2C>(&mut self, i2c: &mut I2C) -> Result<GyroValue, I2C::Error>
+    pub async fn get_gyroscope<I2C>(&mut self, i2c: &mut I2C) -> Result<GyroValue, I2C::Error>
     where
-        I2C: embedded_hal::i2c::I2c,
+        I2C: embedded_hal_async::i2c::I2c,
     {
-        let scale = self.ctrl2g.chain_full_scale();
+        let scale = self.ctrl2g.chain_full_scale().await;
 
         let mut measurements = [0u8; 6];
-        i2c.write_read(self.address, &[0x22], &mut measurements)?;
+        i2c.write_read(self.address, &[0x22], &mut measurements).await?;
 
-        Ok(GyroValue::from_msr(scale, &measurements))
+        Ok(GyroValue::from_msr(scale, &measurements).await)
     }
 
-    pub fn get_accelerometer<I2C>(&mut self, i2c: &mut I2C) -> Result<AccelValue, I2C::Error>
+    pub async fn get_accelerometer<I2C>(&mut self, i2c: &mut I2C) -> Result<AccelValue, I2C::Error>
     where
-        I2C: embedded_hal::i2c::I2c,
+        I2C: embedded_hal_async::i2c::I2c,
     {
-        let scale = self.ctrl1xl.chain_full_scale();
+        let scale = self.ctrl1xl.chain_full_scale().await;
 
         let mut measurements = [0u8; 6];
-        i2c.write_read(self.address, &[0x28], &mut measurements)?;
+        i2c.write_read(self.address, &[0x28], &mut measurements).await?;
 
-        Ok(AccelValue::from_msr(scale, &measurements))
+        Ok(AccelValue::from_msr(scale, &measurements).await)
     }
 
-    pub fn fifo_pop<I2C>(&mut self, i2c: &mut I2C) -> Result<fifo::Value, I2C::Error>
+    /// Get the gyroscope, accelerometer, and temperature values in one go.
+    /// 
+    /// Only works when auto increment is enabled.
+    pub async fn get_measurement<I2C>(&mut self, i2c: &mut I2C) -> Result<Measurement, I2C::Error>
     where
-        I2C: embedded_hal::i2c::I2c,
+        I2C: embedded_hal_async::i2c::I2c,
     {
-        let gyro_scale = self.ctrl2g.chain_full_scale();
-        let accel_scale = self.ctrl1xl.chain_full_scale();
+        // Burst read, only when auto increment is enabled
+        // Temperature is 0x20 to 0x21
+        // Gyroscope is 0x22 to 0x27, X, Y, Z
+        // Accelerometer is 0x28 to 0x2d, X, Y, Z
+        let mut measurements = [0u8; 14];
+        i2c.write_read(self.address, &[0x20], &mut measurements).await?;
 
-        fifo::FifoOut::new(self.address).pop(i2c, gyro_scale, accel_scale)
+        let raw_temp = (measurements[1] as i16) << 8 | measurements[0] as i16;
+        let temp: f32 = (raw_temp as f32 / 256.0) + 25.0;
+
+        let gyro = GyroValue::from_msr(self.ctrl2g.chain_full_scale().await, &measurements[2..8].try_into().unwrap()).await;
+        let accel = AccelValue::from_msr(self.ctrl1xl.chain_full_scale().await, &measurements[8..14].try_into().unwrap()).await;
+
+        Ok(Measurement {
+            gyro,
+            accel,
+            temp,
+        })
+    }
+
+    pub async fn fifo_pop<I2C>(&mut self, i2c: &mut I2C) -> Result<fifo::Value, I2C::Error>
+    where
+        I2C: embedded_hal_async::i2c::I2c,
+    {
+        let gyro_scale = self.ctrl2g.chain_full_scale().await;
+        let accel_scale = self.ctrl1xl.chain_full_scale().await;
+
+        fifo::FifoOut::new(self.address).await.pop(i2c, gyro_scale, accel_scale).await
     }
 }
 
