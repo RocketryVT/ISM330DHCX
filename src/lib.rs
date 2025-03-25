@@ -77,6 +77,37 @@ const SENSORS_DPS_TO_RADS: f64 = 0.017453292;
 const SENSORS_GRAVITY_STANDARD: f64 = 9.80665;
 pub const DEFAULT_I2C_ADDRESS: u8 = 0x6b;
 
+pub struct Options {
+    pub device: DeviceOptions,
+    pub dimension: DimensionOptions,
+    pub acceleromter: AccelerometerOptions,
+    pub gyro: GyroOptions,
+    pub disable_high_performance: bool,
+}
+
+pub struct DeviceOptions {
+    pub set_boot: bool,
+    pub set_bdu: bool,
+    pub set_if_inc: bool,
+}
+
+pub struct DimensionOptions {
+    pub set_den_x: bool,
+    pub set_den_y: bool,
+    pub set_den_z: bool,
+}
+
+pub struct AccelerometerOptions {
+    pub accelerometer_rate: ctrl1xl::Odr_Xl,
+    pub accelerometer_range: ctrl1xl::Fs_Xl,
+    pub enable_low_pass_filter: bool,
+}
+
+pub struct GyroOptions {
+    pub gyro_rate: ctrl2g::Odr,
+    pub gyro_range: ctrl2g::Fs,
+}
+
 #[derive(Debug, Clone, Copy, Format)]
 pub enum Error<E> {
     /// An error occurred while communicating with the ISM330DHCX over I2C. The inner error contains the specific error.
@@ -251,14 +282,14 @@ pub struct Ism330Dhcx {
 }
 
 impl Ism330Dhcx {
-    pub async fn new<I2C>(i2c: &mut I2C) -> Result<Self, I2C::Error>
+    pub async fn new<I2C>(i2c: &mut I2C, options: Options) -> Result<Self, I2C::Error>
     where
         I2C: embedded_hal_async::i2c::I2c,
     {
-        Self::new_with_address(i2c, DEFAULT_I2C_ADDRESS).await
+        Self::new_with_address(i2c, DEFAULT_I2C_ADDRESS, options).await
     }
 
-    pub async fn new_with_address<I2C>(i2c: &mut I2C, address: u8) -> Result<Self, I2C::Error>
+    pub async fn new_with_address<I2C>(i2c: &mut I2C, address: u8, options: Options) -> Result<Self, I2C::Error>
     where
         I2C: embedded_hal_async::i2c::I2c,
     {
@@ -273,7 +304,7 @@ impl Ism330Dhcx {
         let fifoctrl = FifoCtrl::new(registers[9..13].try_into().unwrap(), address).await;
         let fifostatus = FifoStatus::new(address).await;
 
-        let ism330dhcx = Self {
+        let mut ism330dhcx = Self {
             address,
             ctrl1xl,
             ctrl2g,
@@ -283,6 +314,8 @@ impl Ism330Dhcx {
             fifoctrl,
             fifostatus,
         };
+
+        Self::boot_sensor(&mut ism330dhcx, i2c, &options).await?;
 
         Ok(ism330dhcx)
     }
@@ -370,6 +403,50 @@ impl Ism330Dhcx {
         let accel_scale = self.ctrl1xl.chain_full_scale().await;
 
         fifo::FifoOut::new(self.address).await.pop(i2c, gyro_scale, accel_scale).await
+    }
+
+    pub async fn boot_sensor<I2C>(&mut self, i2c: &mut I2C, options: &Options) -> Result<(), I2C::Error>
+    where
+        I2C: embedded_hal_async::i2c::I2c,
+    {
+        // =======================================
+        // CTRL3_C
+        self.ctrl3c.set_boot(i2c, options.device.set_boot).await?;
+        self.ctrl3c.set_bdu(i2c, options.device.set_bdu).await?;
+        self.ctrl3c.set_if_inc(i2c, options.device.set_if_inc).await?;
+
+        // =======================================
+        // CTRL9_XL
+        self.ctrl9xl.set_den_x(i2c, options.dimension.set_den_x).await?;
+        self.ctrl9xl.set_den_y(i2c, options.dimension.set_den_y).await?;
+        self.ctrl9xl.set_den_z(i2c, options.dimension.set_den_z).await?;
+        self.ctrl9xl.set_device_conf(i2c, true).await?;
+
+        // =======================================
+        // CTRL1_XL
+        self.ctrl1xl
+            .set_accelerometer_data_rate(i2c, options.acceleromter.accelerometer_rate)
+            .await?;
+        self.ctrl1xl
+            .set_chain_full_scale(i2c, options.acceleromter.accelerometer_range)
+            .await?;
+        self.ctrl1xl.set_lpf2_xl_en(i2c, options.acceleromter.enable_low_pass_filter).await?;
+
+        // =======================================
+        // CTRL2_G
+        self.ctrl2g
+            .set_gyroscope_data_rate(i2c, options.gyro.gyro_rate)
+            .await?;
+        self.ctrl2g
+            .set_chain_full_scale(i2c, options.gyro.gyro_range)
+            .await?;
+
+        // =======================================
+        // CTRL7_G
+        // If `disable_high_performance` is true, set HM mode; otherwise false.
+        self.ctrl7g.set_g_hm_mode(i2c, options.disable_high_performance).await?;
+
+        Ok(())
     }
 }
 
